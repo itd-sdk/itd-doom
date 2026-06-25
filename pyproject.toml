@@ -5,13 +5,16 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
+    "click>=8.4.2",
     "playwright>=1.60.0",
     "playwright-localstorage>=1.1.0",
     "pynput>=1.8.2",
+    "python3-xlib>=0.15",
 ]
 
 [project.optional-dependencies]
 manual = [
+    "keyboard>=0.13.5",
     "pillow>=12.2.0",
     "pyautogui>=0.9.54",
 ]
