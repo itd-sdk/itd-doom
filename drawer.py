@@ -1,11 +1,14 @@
-from asyncio import AbstractEventLoop, new_event_loop, sleep
+from asyncio import AbstractEventLoop, new_event_loop, run_coroutine_threadsafe, sleep
 from os import getenv
 from time import time
 
 # from keyboard import add_hotkey # keyboard requires root but playwright doesn't run with root so i switched to pynput
-from playwright.async_api import Locator, Page, Playwright
+from playwright.async_api import FloatRect, Locator, Page, Playwright
 from playwright_localstorage import AsyncLocalStorageAccessor
-from pynput.keyboard import Key, KeyCode, Listener
+from pynput.keyboard import Key, KeyCode
+from pynput.keyboard import Listener as KeyboardListener
+from pynput.mouse import Controller
+from pynput.mouse import Listener as MouseListener
 
 loop = new_event_loop()
 
@@ -15,6 +18,8 @@ class Drawer:
     loading_url: str
     keys: set[Key | KeyCode]
     sync_delay: float = 0.1
+    mouse = False
+    lock_mouse = False
 
     async def __init__(
         self, p: Playwright, loop: AbstractEventLoop, quality: float = 0.5
@@ -33,6 +38,11 @@ class Drawer:
         self.game_browser = await self.playwright.firefox.launch(headless=True)
         self.game_page: Page | None = None
         self.game_canvas: Locator | None = None
+
+        self._mouse_controller = Controller()
+        self.center_x = 0
+        self.center_y = 0
+        self.bounding_box: FloatRect | None = None
 
     async def open_itd(self):
         print("\ropen itd       ", end="")
@@ -105,29 +115,121 @@ class Drawer:
                 element.getContext("2d").drawImage(img, 0, 0, element.width, element.height);
             }""",
             await self.game_canvas.evaluate(
-                "(element, quality) => element.toDataURL('image/jpeg', quality)",
+                "(element, quality) => element.toDataURL(   'image/jpeg', quality)",
                 self.quality
             )
         )
 
     def _on_key_press(self, key: Key | KeyCode):
-        if key not in self.keys:
-            return
-
-        pass  # override this
+        assert self.game_page
+        if isinstance(key, KeyCode):
+            run_coroutine_threadsafe(self.game_page.keyboard.down(key.char), self.loop)
+        elif key == Key.space:
+            run_coroutine_threadsafe(self.game_page.keyboard.down("Space"), self.loop)
+        elif key == Key.ctrl:
+            run_coroutine_threadsafe(self.game_page.keyboard.down("Control"), self.loop)
 
     def _on_key_release(self, key: Key | KeyCode):
-        if key not in self.keys:
+        assert self.game_page
+        if isinstance(key, KeyCode):
+            run_coroutine_threadsafe(self.game_page.keyboard.up(key.char), self.loop)
+        elif key == Key.space:
+            run_coroutine_threadsafe(self.game_page.keyboard.up("Space"), self.loop)
+        elif key == Key.ctrl:
+            run_coroutine_threadsafe(self.game_page.keyboard.up("Control"), self.loop)
+
+    def _on_mouse_move(self, x: int, y: int):
+        assert self.itd_canvas
+        assert self.game_page
+
+        if self.center_x == 0 and self.center_y == 0:
+            self.center_x, self.center_y = x, y
             return
 
-        pass  # override this
+        if self.bounding_box is None:
+            self.bounding_box = run_coroutine_threadsafe(
+                self.itd_canvas.bounding_box(), self.loop
+            ).result()
+            if self.bounding_box is None:
+                print("!! box is none")
+                return
+
+        if self.lock_mouse:
+            if self.center_x == x and self.center_y == y:
+                return
+
+            run_coroutine_threadsafe(
+                self.game_page.mouse.move(
+                    (self.bounding_box["x"] + self.bounding_box["width"] / 2)
+                    + (x - self.center_x),
+                    (self.bounding_box["y"] + self.bounding_box["height"] / 2)
+                    + (y - self.center_y)
+                ),
+                self.loop
+            )
+            self._mouse_controller.position = (self.center_x, self.center_y)
+        # else:
+        #     print(
+        #         "move",
+        #         box["x"] + box["width"] * x / 1920,
+        #         box["y"] + box["height"] * y / 1080
+        #     )
+        #     run_coroutine_threadsafe(
+        #         self.game_page.mouse.move(
+        #             box["x"] + box["width"] * x / 1920,
+        #             box["y"] + box["height"] * y / 1080
+        #         ),
+        #         self.loop
+        #     )
+
+    def _on_mouse_click(self, x: int, y: int, button: str, pressed: bool):
+        assert self.itd_canvas
+        assert self.game_page
+
+        if self.bounding_box is None:
+            self.bounding_box = run_coroutine_threadsafe(
+                self.itd_canvas.bounding_box(), self.loop
+            ).result()
+            if self.bounding_box is None:
+                print("!! box is none")
+                return
+
+        print(
+            "click",
+            x - self.center_x + self.bounding_box["x"] + self.bounding_box["width"] / 2,
+            y - self.center_y + self.bounding_box["y"] + self.bounding_box["height"] / 2
+        )
+        run_coroutine_threadsafe(
+            self.game_page.mouse.move(
+                x
+                - self.center_x
+                + self.bounding_box["x"]
+                + self.bounding_box["width"] / 2,
+                y
+                - self.center_y
+                + self.bounding_box["y"]
+                + self.bounding_box["height"] / 2
+            ),
+            self.loop
+        )
+        if pressed:
+            run_coroutine_threadsafe(self.game_page.mouse.down(), self.loop)
+        else:
+            run_coroutine_threadsafe(self.game_page.mouse.up(), self.loop)
 
     async def _print_fps(self, frames: list[float | int]):
         print(f"\r{round(len(frames) / 10, 2)} fps        ", end="")
 
     async def start_listeners(self):
         print("\rstart listeners      ", end="")
-        Listener(on_press=self._on_key_press, on_release=self._on_key_release).start()
+        KeyboardListener(
+            on_press=self._on_key_press, on_release=self._on_key_release
+        ).start()
+        print(self.mouse)
+        if self.mouse:
+            MouseListener(
+                on_move=self._on_mouse_move, on_click=self._on_mouse_click
+            ).start()
 
     async def run_syncing(self):
         frames: list[float | int] = []
