@@ -12,14 +12,21 @@ from pynput.mouse import Listener as MouseListener
 
 loop = new_event_loop()
 
+keymap: dict[Key, str] = {
+    Key.ctrl: "Control",
+    Key.alt: "Alt",
+    Key.shift: "Shift",
+    Key.space: "Space"
+}
+
 
 class Drawer:
     game_url: str
     loading_url: str
-    keys: set[Key | KeyCode]
     sync_delay: float = 0.1
     mouse = False
     lock_mouse = False
+    _get_image_script = "(element, quality) => element.toDataURL('image/jpeg', quality)"
 
     async def __init__(
         self, p: Playwright, loop: AbstractEventLoop, quality: float = 0.5
@@ -34,6 +41,8 @@ class Drawer:
         self.itd_context = await self.itd_browser.new_context()
         self.itd_page: Page | None = None
         self.itd_canvas: Locator | None = None
+        self.itd_bounding_box: FloatRect | None = None
+        self.game_bounding_box: FloatRect | None = None
 
         self.game_browser = await self.playwright.firefox.launch(headless=True)
         self.game_page: Page | None = None
@@ -42,7 +51,7 @@ class Drawer:
         self._mouse_controller = Controller()
         self.center_x = 0
         self.center_y = 0
-        self.bounding_box: FloatRect | None = None
+        self._mouse_pos = (0, 0)
 
     async def open_itd(self):
         print("\ropen itd       ", end="")
@@ -106,17 +115,19 @@ class Drawer:
     async def sync_canvas(self):
         assert self.itd_canvas
         assert self.game_canvas
-
         await self.itd_canvas.evaluate(
-            """async (element, src) => {
+            """async (element, data) => {
                 img = new Image();
-                img.src = src;
+                img.src = data[0];
                 await img.decode();
-                element.getContext("2d").drawImage(img, 0, 0, element.width, element.height);
+                context = element.getContext("2d");
+                context.drawImage(img, 0, 0, element.width, element.height);
+                context.fillStyle = "white";
+                //context.fillRect(data[1], data[2], 10, 10);
             }""",
-            await self.game_canvas.evaluate(
-                "(element, quality) => element.toDataURL(   'image/jpeg', quality)",
-                self.quality
+            (
+                await self.game_canvas.evaluate(self._get_image_script, self.quality),
+                *self._mouse_pos
             )
         )
 
@@ -124,33 +135,40 @@ class Drawer:
         assert self.game_page
         if isinstance(key, KeyCode):
             run_coroutine_threadsafe(self.game_page.keyboard.down(key.char), self.loop)
-        elif key == Key.space:
-            run_coroutine_threadsafe(self.game_page.keyboard.down("Space"), self.loop)
-        elif key == Key.ctrl:
-            run_coroutine_threadsafe(self.game_page.keyboard.down("Control"), self.loop)
+        elif key in keymap:
+            run_coroutine_threadsafe(
+                self.game_page.keyboard.down(keymap[key]), self.loop
+            )
 
     def _on_key_release(self, key: Key | KeyCode):
         assert self.game_page
         if isinstance(key, KeyCode):
             run_coroutine_threadsafe(self.game_page.keyboard.up(key.char), self.loop)
-        elif key == Key.space:
-            run_coroutine_threadsafe(self.game_page.keyboard.up("Space"), self.loop)
-        elif key == Key.ctrl:
-            run_coroutine_threadsafe(self.game_page.keyboard.up("Control"), self.loop)
+        elif key in keymap:
+            run_coroutine_threadsafe(self.game_page.keyboard.up(keymap[key]), self.loop)
 
-    def _on_mouse_move(self, x: int, y: int):
+    def _on_mouse_move(self, x: int, y: int, wait: bool = False):
         assert self.itd_canvas
         assert self.game_page
+        assert self.game_canvas
 
         if self.center_x == 0 and self.center_y == 0:
             self.center_x, self.center_y = x, y
             return
 
-        if self.bounding_box is None:
-            self.bounding_box = run_coroutine_threadsafe(
+        if self.itd_bounding_box is None:
+            self.itd_bounding_box = run_coroutine_threadsafe(
                 self.itd_canvas.bounding_box(), self.loop
             ).result()
-            if self.bounding_box is None:
+            if self.itd_bounding_box is None:
+                print("!! box is none")
+                return
+
+        if self.game_bounding_box is None:
+            self.game_bounding_box = run_coroutine_threadsafe(
+                self.game_canvas.bounding_box(), self.loop
+            ).result()
+            if self.game_bounding_box is None:
                 print("!! box is none")
                 return
 
@@ -158,64 +176,40 @@ class Drawer:
             if self.center_x == x and self.center_y == y:
                 return
 
+            # я не знаю почему 135 и почему itd_bounding_box["width"], но это работает
+            # 135 я вручную посчитал (если больше то мышка уходит всегда вверх, есили меньше то всегда вниз). на других компах мб другое значение
             run_coroutine_threadsafe(
                 self.game_page.mouse.move(
-                    (self.bounding_box["x"] + self.bounding_box["width"] / 2)
+                    (self.itd_bounding_box["x"] + self.itd_bounding_box["width"] / 2)
                     + (x - self.center_x),
-                    (self.bounding_box["y"] + self.bounding_box["height"] / 2)
-                    + (y - self.center_y)
+                    (self.itd_bounding_box["height"] / 2) + 135 + (y - self.center_y)
                 ),
                 self.loop
             )
             self._mouse_controller.position = (self.center_x, self.center_y)
-        # else:
-        #     print(
-        #         "move",
-        #         box["x"] + box["width"] * x / 1920,
-        #         box["y"] + box["height"] * y / 1080
-        #     )
-        #     run_coroutine_threadsafe(
-        #         self.game_page.mouse.move(
-        #             box["x"] + box["width"] * x / 1920,
-        #             box["y"] + box["height"] * y / 1080
-        #         ),
-        #         self.loop
-        #     )
+        else:
+            self._mouse_pos = (
+                self.game_bounding_box["x"]
+                + (x - self.center_x + self.itd_bounding_box["width"] / 2)
+                * (self.game_bounding_box["width"] / self.itd_bounding_box["width"]),
+                self.game_bounding_box["y"]
+                + (y - self.center_y + self.itd_bounding_box["height"] / 2)
+                * (self.game_bounding_box["height"] / self.itd_bounding_box["height"])
+            )
+            future = run_coroutine_threadsafe(
+                self.game_page.mouse.move(*self._mouse_pos), self.loop
+            )
+            if wait:
+                future.result()
 
     def _on_mouse_click(self, x: int, y: int, button: str, pressed: bool):
-        assert self.itd_canvas
         assert self.game_page
 
-        if self.bounding_box is None:
-            self.bounding_box = run_coroutine_threadsafe(
-                self.itd_canvas.bounding_box(), self.loop
-            ).result()
-            if self.bounding_box is None:
-                print("!! box is none")
-                return
-
-        print(
-            "click",
-            x - self.center_x + self.bounding_box["x"] + self.bounding_box["width"] / 2,
-            y - self.center_y + self.bounding_box["y"] + self.bounding_box["height"] / 2
-        )
-        run_coroutine_threadsafe(
-            self.game_page.mouse.move(
-                x
-                - self.center_x
-                + self.bounding_box["x"]
-                + self.bounding_box["width"] / 2,
-                y
-                - self.center_y
-                + self.bounding_box["y"]
-                + self.bounding_box["height"] / 2
-            ),
-            self.loop
-        )
+        self._on_mouse_move(x, y, wait=not self.lock_mouse)
         if pressed:
-            run_coroutine_threadsafe(self.game_page.mouse.down(), self.loop)
+            run_coroutine_threadsafe(self.game_page.mouse.down(), self.loop).result()
         else:
-            run_coroutine_threadsafe(self.game_page.mouse.up(), self.loop)
+            run_coroutine_threadsafe(self.game_page.mouse.up(), self.loop).result()
 
     async def _print_fps(self, frames: list[float | int]):
         print(f"\r{round(len(frames) / 10, 2)} fps        ", end="")

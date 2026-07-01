@@ -6,37 +6,18 @@ from drawer import Drawer
 class UltrakillDrawer(Drawer):
     game_url = "https://html-classic.itch.zone/html/15139480/ultrakill/index.html"
     loading_url = (
-        "https://cdn.xn--d1ah4a.com/images/11b3680a-4429-490f-918a-45caca90882b.jpg"
+        "https://cdn.xn--d1ah4a.com/images/15d69e8f-1f34-453e-9b62-6292c2d9e768.jpg"
     )
     mouse = True
+    _get_image_script = """
+    (element, quality) => new Promise(resolve => {
+          requestAnimationFrame(() => {
+              resolve(element.toDataURL('image/jpeg', quality));
+          });
+      })
+    """
 
     def _on_key_release(self, key: Key | KeyCode):
         super()._on_key_release(key)
-        if key == Key.enter:
+        if key == Key.ctrl:
             self.lock_mouse = True
-
-    async def sync_canvas(self):
-        assert self.itd_canvas
-        assert self.game_canvas
-
-        await self.itd_canvas.evaluate(
-            """async (element, src) => {
-                img = new Image();
-                img.src = src;
-                await img.decode();
-                context = element.getContext("2d");
-                context.drawImage(img, 0, 0, element.width, element.height);
-                //context.fillStyle = "#fff";
-                //context.fillText("Загрузка..", 10, 50);
-            }""",
-            await self.game_canvas.evaluate(
-                """
-                (element, quality) => new Promise(resolve => {
-                      requestAnimationFrame(() => {
-                          resolve(element.toDataURL('image/jpeg', quality));
-                      });
-                  })
-                """,
-                self.quality
-            )
-        )
